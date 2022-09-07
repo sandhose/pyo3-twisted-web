@@ -1,0 +1,13 @@
+[package]
+name = "pyo3-twisted-web"
+version = "0.1.0"
+authors = ["Quentin Gliech <quenting@element.io>"]
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+bytes = "1.2"
+http = "0.2"
+pyo3 = { version = "0.16", default-features = false }
+pyo3-asyncio = { version = "0.16", features = ["tokio-runtime"] }
+tower = { version = "0.4", features = ["util"] }
