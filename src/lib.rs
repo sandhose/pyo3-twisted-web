@@ -95,6 +95,11 @@ impl Resource {
 
 #[pymethods]
 impl Resource {
+    #[setter]
+    fn server(&self, _server: &PyAny) {
+        let _ = self;
+    }
+
     #[getter(isLeaf)]
     fn is_leaf(&self) -> bool {
         let _ = self;
