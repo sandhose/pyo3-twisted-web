@@ -1,27 +1,28 @@
-# Handle Twisted requests through a [`tower::Service`]
-                                                                                        
-This library helps converting Twisted's [`IRequest`][IRequest] to an
-[`http::Request`], and then sending the [`http::Response`] back.
-                                                                                        
+# Handle Twisted requests through a `tower::Service`
+
+This library helps converting Twisted's [`IRequest`][IRequest] to an `http::Request`, and then sending the `http::Response` back.
+
 [IRequest]: https://docs.twistedmatrix.com/en/latest/api/twisted.web.iweb.IRequest.html
-                                                                                        
-# Example
-                                                                                        
+
+# Usage
+
+## Handle a Twisted request through a Service
+
 ```rust
 use std::convert::Infallible;
-                                                                                        
+
 use bytes::Bytes;
 use http::{Request, Response};
 use pyo3::prelude::*;
 use tower::util::BoxCloneService;
-                                                                                        
+
 use pyo3_twisted_web::handle_twisted_request_through_service;
-                                                                                        
+
 #[pyclass]
 struct Handler {
     service: BoxCloneService<Request<Bytes>, Response<Bytes>, Infallible>,
 }
-                                                                                        
+
 #[pymethods]
 impl Handler {
     #[new]
@@ -30,27 +31,27 @@ impl Handler {
             let response = Response::new(Bytes::from("hello"));
             Ok(response)
         });
-                                                                                        
+
         Self {
             service: BoxCloneService::new(service),
         }
     }
-                                                                                        
+
     fn handle<'a>(&self, twisted_request: &'a PyAny) -> PyResult<&'a PyAny> {
         let service = self.service.clone();
         handle_twisted_request_through_service(service, twisted_request)
     }
 }
-                                                                                        
+
 #[pymodule]
 fn my_handler(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<Handler>()?;
     Ok(())
 }
 ```
-                                                                                        
+
 And on the Python side:
-                                                                                        
+
 ```python
 from twisted.internet import asyncioreactor
 asyncioreactor.install()
@@ -76,6 +77,73 @@ class MyResource(resource.Resource):
         return NOT_DONE_YET
 
 endpoints.serverFromString(reactor, "tcp:8888").listen(server.Site(MyResource()))
+reactor.run()
+```
+
+## Define a Twisted `Resource` out of a Service
+
+```rust
+use std::convert::Infallible;
+
+use bytes::Bytes;
+use http::{Request, Response};
+use pyo3::prelude::*;
+
+use pyo3_twisted_web::Resource;
+
+// Via a (sub)class
+#[pyclass(extends=Resource)]
+struct MyResource;
+
+#[pymethods]
+impl MyResource {
+    #[new]
+    fn new() -> (Self, Resource) {
+        let service = tower::service_fn(|_request: Request<Bytes>| async move {
+            let response = Response::new(Bytes::from("hello"));
+            Ok(response)
+        });
+
+        let super_ = Resource::new::<_, _, Infallible>(service);
+        (Self, super_)
+    }
+}
+
+// Via a function
+#[pyfunction]
+fn get_resource(py: Python) -> PyResult<Py<Resource>> {
+    let service = tower::service_fn(|_request: Request<Bytes>| async move {
+        let response = Response::new(Bytes::from("hello"));
+        Ok(response)
+    });
+
+    Py::new(py, Resource::new::<_, _, Infallible>(service))
+}
+
+#[pymodule]
+fn my_handler(_py: Python, m: &PyModule) -> PyResult<()> {
+    m.add_class::<MyResource>()?;
+    m.add_function(wrap_pyfunction!(get_resource, m)?)?;
+    Ok(())
+}
+```
+
+And on the Python side:
+
+```python
+from twisted.internet import asyncioreactor
+asyncioreactor.install()
+
+import asyncio
+from twisted.web.server import Site
+from twisted.internet import endpoints, reactor
+
+from my_handler import MyResource, get_resource
+
+endpoints.serverFromString(reactor, "tcp:8888").listen(Site(MyResource()))
+# or
+endpoints.serverFromString(reactor, "tcp:8888").listen(Site(get_resource()))
+
 reactor.run()
 ```
 

@@ -15,16 +15,104 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::all, rustdoc::all)]
 #![warn(clippy::pedantic)]
+#![allow(clippy::borrow_deref_ref, clippy::used_underscore_binding)]
 #![doc = include_str!("../README.md")]
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use http::{header::HeaderName, HeaderValue, Method, Request, Response, Uri};
 use pyo3::{
     exceptions::PyValueError,
+    pyclass, pymethods,
     types::{PyBytes, PySequence, PyTuple},
     IntoPy, PyAny, PyErr, PyResult, Python,
 };
-use tower::{util::Oneshot, Service};
+use tower::{
+    util::{BoxCloneService, Oneshot},
+    Service, ServiceExt,
+};
+
+/// A Resource python class which implements ``twisted.web.resource.IResource`` from a [`Service`].
+/// It doesn't have a Python constructor, so it is expected to be either subclassed or returned
+/// from a Rust function:
+///
+/// ```rust
+/// use std::convert::Infallible;
+///
+/// use bytes::Bytes;
+/// use http::{Request, Response};
+/// use pyo3::prelude::*;
+///
+/// use pyo3_twisted_web::Resource;
+///
+/// #[pyclass(extends=Resource)]
+/// struct MyResource;
+///
+/// #[pymethods]
+/// impl MyResource {
+///     #[new]
+///     fn new() -> (Self, Resource) {
+///         let service = tower::service_fn(|_request: Request<Bytes>| async move {
+///             let response = Response::new(Bytes::from("hello"));
+///             Ok(response)
+///         });
+///
+///         let super_ = Resource::new::<_, _, Infallible>(service);
+///         (Self, super_)
+///     }
+/// }
+///
+/// #[pyfunction]
+/// fn my_resource(py: Python) -> PyResult<Py<Resource>> {
+///     let service = tower::service_fn(|_request: Request<Bytes>| async move {
+///         let response = Response::new(Bytes::from("hello"));
+///         Ok(response)
+///     });
+///
+///     Py::new(py, Resource::new::<_, _, Infallible>(service))
+/// }
+/// ```
+#[pyclass(subclass)]
+pub struct Resource {
+    service: BoxCloneService<Request<Bytes>, Response<Bytes>, PyErr>,
+}
+
+impl Resource {
+    pub fn new<S, B, E>(service: S) -> Self
+    where
+        S: Service<Request<Bytes>, Response = Response<B>, Error = E> + Clone + Send + 'static,
+        S::Future: Send,
+        B: Into<Bytes>,
+        E: Into<PyErr> + 'static,
+    {
+        let service = service
+            .map_response(|response: Response<B>| response.map(Into::into))
+            .map_err(Into::into)
+            .boxed_clone();
+
+        Self { service }
+    }
+}
+
+#[pymethods]
+impl Resource {
+    #[getter(isLeaf)]
+    fn is_leaf(&self) -> bool {
+        let _ = self;
+        true
+    }
+
+    fn render<'a>(&self, py: Python<'a>, request: &'a PyAny) -> PyResult<&'a PyAny> {
+        let service = self.service.clone();
+        let not_done_yet = py.import("twisted.web.server")?.getattr("NOT_DONE_YET")?;
+        let defer = py.import("twisted.internet.defer")?;
+        let future = handle_twisted_request_through_service(service, request)?;
+        let deferred = defer
+            .getattr("Deferred")?
+            .call_method1("fromFuture", (future,))?;
+        defer.getattr("ensureDeferred")?.call1((deferred,))?;
+        Ok(not_done_yet)
+    }
+}
 
 /// Read a file-like Python object by chunks
 ///
