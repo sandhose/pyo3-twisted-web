@@ -15,21 +15,30 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::all, rustdoc::all)]
 #![warn(clippy::pedantic)]
-#![allow(clippy::borrow_deref_ref, clippy::used_underscore_binding)]
+#![allow(
+    clippy::borrow_deref_ref,
+    clippy::used_underscore_binding,
+    clippy::trait_duplication_in_bounds
+)]
 #![doc = include_str!("../README.md")]
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use http::{header::HeaderName, HeaderValue, Method, Request, Response, Uri};
+use http_body::{combinators::UnsyncBoxBody, Body, Full};
 use pyo3::{
     exceptions::PyValueError,
     pyclass, pymethods,
     types::{PyBytes, PySequence, PyTuple},
-    IntoPy, PyAny, PyErr, PyResult, Python,
+    IntoPy, Py, PyAny, PyErr, PyResult, Python,
 };
 use tower::{
     util::{BoxCloneService, Oneshot},
     Service, ServiceExt,
 };
+
+mod util;
+
+use self::util::BoxBuf;
 
 /// A Resource python class which implements ``twisted.web.resource.IResource`` from a [`Service`].
 /// It doesn't have a Python constructor, so it is expected to be either subclassed or returned
@@ -51,41 +60,52 @@ use tower::{
 /// impl MyResource {
 ///     #[new]
 ///     fn new() -> (Self, Resource) {
-///         let service = tower::service_fn(|_request: Request<Bytes>| async move {
-///             let response = Response::new(Bytes::from("hello"));
+///         let service = tower::service_fn(|_request: Request<_>| async move {
+///             let response = Response::new(String::from("hello"));
 ///             Ok(response)
 ///         });
 ///
-///         let super_ = Resource::new::<_, _, Infallible>(service);
+///         let super_ = Resource::from_service::<_, _, Infallible>(service);
 ///         (Self, super_)
 ///     }
 /// }
 ///
 /// #[pyfunction]
 /// fn my_resource(py: Python) -> PyResult<Py<Resource>> {
-///     let service = tower::service_fn(|_request: Request<Bytes>| async move {
-///         let response = Response::new(Bytes::from("hello"));
+///     let service = tower::service_fn(|_request: Request<_>| async move {
+///         let response = Response::new(String::from("hello"));
 ///         Ok(response)
 ///     });
 ///
-///     Py::new(py, Resource::new::<_, _, Infallible>(service))
+///     Py::new(py, Resource::from_service::<_, _, Infallible>(service))
 /// }
 /// ```
 #[pyclass(subclass)]
 pub struct Resource {
-    service: BoxCloneService<Request<Bytes>, Response<Bytes>, PyErr>,
+    service: BoxCloneService<Request<Full<Bytes>>, Response<UnsyncBoxBody<BoxBuf, PyErr>>, PyErr>,
 }
 
 impl Resource {
-    pub fn new<S, B, E>(service: S) -> Self
+    pub fn from_service<S, B, E>(service: S) -> Self
     where
-        S: Service<Request<Bytes>, Response = Response<B>, Error = E> + Clone + Send + 'static,
+        S: Service<Request<Full<Bytes>>, Response = Response<B>, Error = E>
+            + Clone
+            + Send
+            + 'static,
         S::Future: Send,
-        B: Into<Bytes>,
+        B: Body + Send + 'static,
+        B::Data: Buf,
+        B::Error: Into<PyErr>,
         E: Into<PyErr> + 'static,
     {
         let service = service
-            .map_response(|response: Response<B>| response.map(Into::into))
+            .map_response(|response: Response<B>| {
+                response.map(|body| {
+                    let body = body.map_data(BoxBuf::new).map_err(Into::into);
+
+                    UnsyncBoxBody::new(body)
+                })
+            })
             .map_err(Into::into)
             .boxed_clone();
 
@@ -205,12 +225,7 @@ where
 {
     let (parts, mut body) = response.into_parts();
 
-    request.call_method1("setResponseCode", (parts.status.as_u16(),))?;
-
-    let response_headers = request.getattr("responseHeaders")?;
-    for (name, value) in parts.headers.iter() {
-        response_headers.call_method1("addRawHeader", (name.as_str(), value.as_bytes()))?;
-    }
+    send_parts(request, &parts)?;
 
     while body.remaining() != 0 {
         let chunk = body.chunk();
@@ -223,25 +238,70 @@ where
     Ok(())
 }
 
+/// Send the [`http::response::Parts`] of a request through Twisted
+///
+/// # Errors
+///
+/// Returns an error if the Python object doesn't properly implement ``IRequest``
+fn send_parts(request: &PyAny, parts: &http::response::Parts) -> PyResult<()> {
+    request.call_method1("setResponseCode", (parts.status.as_u16(),))?;
+
+    let response_headers = request.getattr("responseHeaders")?;
+    for (name, value) in parts.headers.iter() {
+        response_headers.call_method1("addRawHeader", (name.as_str(), value.as_bytes()))?;
+    }
+
+    Ok(())
+}
+
+async fn send_body<B>(request: Py<PyAny>, body: B) -> PyResult<()>
+where
+    B: Body + Send + 'static,
+    B::Data: Buf,
+    PyErr: From<B::Error>,
+{
+    futures_util::pin_mut!(body);
+
+    while let Some(res) = body.data().await {
+        let mut data = res?;
+
+        Python::with_gil(|py| {
+            // Push each chunk
+            while data.remaining() != 0 {
+                let chunk = data.chunk();
+                request.call_method1(py, "write", (chunk,))?;
+                data.advance(chunk.len());
+            }
+
+            PyResult::Ok(())
+        })?;
+    }
+
+    Python::with_gil(|py| request.call_method0(py, "finish"))?;
+
+    Ok(())
+}
+
 /// Handle a Twisted request through a [`Service`]
 ///
 ///  # Errors
 ///
 /// Returns an error if the Python object doens't properly implement ``IRequest``
-pub fn handle_twisted_request_through_service<S, B, E>(
+pub fn handle_twisted_request_through_service<S, E, ResBody>(
     service: S,
     twisted_request: &PyAny,
 ) -> PyResult<&PyAny>
 where
-    S: Service<Request<Bytes>, Response = Response<B>, Error = E> + Send + 'static,
+    S: Service<Request<Full<Bytes>>, Response = Response<ResBody>, Error = E> + Send + 'static,
     S::Future: Send,
-    B: Buf + Send,
-    PyErr: From<E>,
+    ResBody: Body + Send + 'static,
+    PyErr: From<E> + From<ResBody::Error>,
 {
     let py = twisted_request.py();
 
     // First, transform the Twisted request to an `http::Request` one
     let request = http_request_from_twisted(twisted_request)?;
+    let request = request.map(Full::new);
 
     // Get an owned version of the object, so we can release the GIL
     let twisted_request = twisted_request.into_py(py);
@@ -250,13 +310,10 @@ where
     pyo3_asyncio::tokio::future_into_py(py, async move {
         // Call the service
         let response = Oneshot::new(service, request).await?;
+        let (parts, body) = response.into_parts();
 
-        // Now that we ran the service and got our response, re-acquire the GIL so we can reply
-        Python::with_gil(|py| {
-            // Now we can get back a reference to that object
-            let twisted_request = twisted_request.as_ref(py);
-            // And actually reply
-            http_response_to_twisted(twisted_request, response)
-        })
+        Python::with_gil(|py| send_parts(twisted_request.as_ref(py), &parts))?;
+
+        send_body(twisted_request, body).await
     })
 }

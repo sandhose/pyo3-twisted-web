@@ -13,6 +13,7 @@ use std::convert::Infallible;
 
 use bytes::Bytes;
 use http::{Request, Response};
+use http_body::Full;
 use pyo3::prelude::*;
 use tower::util::BoxCloneService;
 
@@ -20,15 +21,15 @@ use pyo3_twisted_web::handle_twisted_request_through_service;
 
 #[pyclass]
 struct Handler {
-    service: BoxCloneService<Request<Bytes>, Response<Bytes>, Infallible>,
+    service: BoxCloneService<Request<Full<Bytes>>, Response<String>, Infallible>,
 }
 
 #[pymethods]
 impl Handler {
     #[new]
     fn new() -> Self {
-        let service = tower::service_fn(|_request: Request<Bytes>| async move {
-            let response = Response::new(Bytes::from("hello"));
+        let service = tower::service_fn(|_request: Request<_>| async move {
+            let response = Response::new(String::from("hello"));
             Ok(response)
         });
 
@@ -99,12 +100,12 @@ struct MyResource;
 impl MyResource {
     #[new]
     fn new() -> (Self, Resource) {
-        let service = tower::service_fn(|_request: Request<Bytes>| async move {
-            let response = Response::new(Bytes::from("hello"));
+        let service = tower::service_fn(|_request: Request<_>| async move {
+            let response = Response::new(String::from("hello"));
             Ok(response)
         });
 
-        let super_ = Resource::new::<_, _, Infallible>(service);
+        let super_ = Resource::from_service::<_, _, Infallible>(service);
         (Self, super_)
     }
 }
@@ -112,12 +113,12 @@ impl MyResource {
 // Via a function
 #[pyfunction]
 fn get_resource(py: Python) -> PyResult<Py<Resource>> {
-    let service = tower::service_fn(|_request: Request<Bytes>| async move {
-        let response = Response::new(Bytes::from("hello"));
+    let service = tower::service_fn(|_request: Request<_>| async move {
+        let response = Response::new(String::from("hello"));
         Ok(response)
     });
 
-    Py::new(py, Resource::new::<_, _, Infallible>(service))
+    Py::new(py, Resource::from_service::<_, _, Infallible>(service))
 }
 
 #[pymodule]
