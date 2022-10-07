@@ -15,11 +15,6 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::all, rustdoc::all)]
 #![warn(clippy::pedantic)]
-#![allow(
-    clippy::borrow_deref_ref,
-    clippy::used_underscore_binding,
-    clippy::trait_duplication_in_bounds
-)]
 #![doc = include_str!("../README.md")]
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -287,6 +282,7 @@ where
 ///  # Errors
 ///
 /// Returns an error if the Python object doens't properly implement ``IRequest``
+#[allow(clippy::trait_duplication_in_bounds)]
 pub fn handle_twisted_request_through_service<S, E, ResBody>(
     service: S,
     twisted_request: &PyAny,
