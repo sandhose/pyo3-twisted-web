@@ -7,6 +7,7 @@ license = "Apache-2.0"
 description = "Handle Python Twisted requests through a Tower service in Rust"
 repository = "https://github.com/sandhose/pyo3-twisted-web/"
 rust-version = "1.56"
+exclude = ["/.github", ".gitignore"]
 
 [dependencies]
 bytes = "1"
