@@ -142,7 +142,7 @@ impl Resource {
 pub fn read_io_body(body: &PyAny, chunk_size: usize) -> PyResult<Bytes> {
     let mut buf = BytesMut::new();
     loop {
-        let bytes: &PyBytes = body.call_method1("read", (chunk_size,))?.cast_as()?;
+        let bytes: &PyBytes = body.call_method1("read", (chunk_size,))?.downcast()?;
         if bytes.as_bytes().is_empty() {
             return Ok(buf.into());
         }
@@ -167,11 +167,11 @@ pub fn http_request_from_twisted(request: &PyAny) -> PyResult<Request<Bytes>> {
 
     let mut req = Request::new(body);
 
-    let uri: &PyBytes = request.getattr("uri")?.cast_as()?;
+    let uri: &PyBytes = request.getattr("uri")?.downcast()?;
     *req.uri_mut() =
         Uri::try_from(uri.as_bytes()).map_err(|_| PyValueError::new_err("invalid uri"))?;
 
-    let method: &PyBytes = request.getattr("method")?.cast_as()?;
+    let method: &PyBytes = request.getattr("method")?.downcast()?;
     *req.method_mut() = Method::from_bytes(method.as_bytes())
         .map_err(|_| PyValueError::new_err("invalid method"))?;
 
@@ -184,14 +184,14 @@ pub fn http_request_from_twisted(request: &PyAny) -> PyResult<Request<Bytes>> {
 
         for header in headers_iter {
             let header = header?;
-            let header: &PyTuple = header.cast_as()?;
-            let name: &PyBytes = header.get_item(0)?.cast_as()?;
+            let header: &PyTuple = header.downcast()?;
+            let name: &PyBytes = header.get_item(0)?.downcast()?;
             let name = HeaderName::from_bytes(name.as_bytes())
                 .map_err(|_| PyValueError::new_err("invalid header name"))?;
 
-            let values: &PySequence = header.get_item(1)?.cast_as()?;
+            let values: &PySequence = header.get_item(1)?.downcast()?;
             for index in 0..values.len()? {
-                let value: &PyBytes = values.get_item(index)?.cast_as()?;
+                let value: &PyBytes = values.get_item(index)?.downcast()?;
                 let value = HeaderValue::from_bytes(value.as_bytes())
                     .map_err(|_| PyValueError::new_err("invalid header value"))?;
                 headers.append(name.clone(), value);
